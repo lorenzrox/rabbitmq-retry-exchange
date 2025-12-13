@@ -285,7 +285,7 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
         [#binding{args = Args} | _] ->
             case rabbit_misc:table_lookup(Args, <<"x-dead-letter-exchange">>) of
                 undefined ->
-                    ?LOG_DEBUG("Retry Exchange (~s): No fallback DLX configured. Message dropped.",
+                    ?LOG_WARNING("Retry Exchange (~s): No fallback DLX configured. Message dropped.",
                                [XName#resource.name]),
                     [];
                 {longstr, DLXName} ->
@@ -318,13 +318,13 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
                             _ = rabbit_queue_type:deliver(Qs, DLMsg, #{}, stateless),
                             [];
                         _ ->
-                            ?LOG_DEBUG("Retry Exchange (~s): Configured DLX ~s not found.",
+                            ?LOG_WARNING("Retry Exchange (~s): Configured DLX ~s not found. Message dropped.",
                                        [XName#resource.name, DLXName]),
                             []
                     end
             end;
         _ ->
-            ?LOG_DEBUG("Retry Exchange (~s): Message max attempts reached, but no matching "
+            ?LOG_WARNING("Retry Exchange (~s): Message max attempts reached, but no matching "
                        "bindings found to route to fallback DLX. Message dropped.",
                        [XName#resource.name]),
             []
