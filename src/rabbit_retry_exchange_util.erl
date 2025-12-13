@@ -69,8 +69,8 @@ validate_delay({_Type, Term}) ->
 
 validate_max_delay({long, Term}, Args) when is_integer(Term) ->
     case rabbit_misc:table_lookup(Args, <<"x-retry-delay">>) of
-        {longstr, MaxDelay} ->
-            case Term >= MaxDelay of
+        {long, Delay} ->
+            case Term >= Delay of
                 true ->
                     ok;
                 false ->

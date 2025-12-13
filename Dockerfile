@@ -1,4 +1,4 @@
-FROM rabbitmq:4.2.1-management
+FROM rabbitmq:management
 
 COPY dist/*.ez /plugins/
 

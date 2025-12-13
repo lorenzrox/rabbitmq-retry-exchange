@@ -12,6 +12,7 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
+-include_lib("rabbit/include/rabbit_global_counters.hrl").
 -include_lib("rabbit/include/mc.hrl").
 -include_lib("rabbit/include/amqqueue.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -220,7 +221,7 @@ pop_annotations(#mc{annotations = Anns} = Msg) ->
                              Acc#{<<"x-last-death-exchange">> => Value, ?ANN_EXCHANGE => Value};
                          <<"x-retry-last-death-reason">> ->
                              Acc#{<<"x-last-death-reason">> => Value};
-                         <<"x-retry-last-death-queue">> -> Acc#{<<"x-last-death-reason">> => Value};
+                         <<"x-retry-last-death-queue">> -> Acc#{<<"x-last-death-queue">> => Value};
                          _ -> Acc#{Key => Value}
                      end
                   end,
@@ -285,8 +286,8 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
         [#binding{args = Args} | _] ->
             case rabbit_misc:table_lookup(Args, <<"x-dead-letter-exchange">>) of
                 undefined ->
-                    ?LOG_DEBUG("Retry Exchange (~s): No fallback DLX configured. Message dropped.",
-                               [XName#resource.name]),
+                    ?LOG_WARNING("Retry Exchange (~s): No fallback DLX configured. Message dropped.",
+                                 [XName#resource.name]),
                     [];
                 {longstr, DLXName} ->
                     case rabbit_db_exchange:get(
@@ -318,15 +319,15 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
                             _ = rabbit_queue_type:deliver(Qs, DLMsg, #{}, stateless),
                             [];
                         _ ->
-                            ?LOG_DEBUG("Retry Exchange (~s): Configured DLX ~s not found.",
-                                       [XName#resource.name, DLXName]),
+                            ?LOG_WARNING("Retry Exchange (~s): Configured DLX ~s not found. Message dropped.",
+                                         [XName#resource.name, DLXName]),
                             []
                     end
             end;
         _ ->
-            ?LOG_DEBUG("Retry Exchange (~s): Message max attempts reached, but no matching "
-                       "bindings found to route to fallback DLX. Message dropped.",
-                       [XName#resource.name]),
+            ?LOG_WARNING("Retry Exchange (~s): Message max attempts reached, but no matching "
+                         "bindings found to route to fallback DLX. Message dropped.",
+                         [XName#resource.name]),
             []
     end.
 
