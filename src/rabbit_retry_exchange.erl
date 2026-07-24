@@ -99,19 +99,20 @@ route(#exchange{name = XName, arguments = Args}, Msg, _Opts) ->
                                                      RoutingKey == OriginalQueueName
                                                   end),
                     Qs1 = rabbit_db_queue:get_targets(Qs0),
-                    Qs2 = rabbit_amqqueue:prepend_extra_bcc(Qs1),
-                    Delay = calculate_delay(RetryCount, Args),
-
-                    %% Annotate message with TTL delay & routing headers for the delay queue
-                    Msg1 =
-                        push_annotations(Msg,
-                                         RetryCount,
-                                         Delay,
-                                         OriginalQueueName,
-                                         OriginalRoutingKey,
-                                         DeathInfo),
-                    _ = rabbit_queue_type:deliver(Qs2, Msg1, #{}, stateless),
-                    []
+                    case Qs1 of
+                        [] ->
+                            ?LOG_WARNING("Retry Exchange (~s): No retry queue binding found for "
+                                         "queue '~s'. Routing to fallback DLX.",
+                                         [XName#resource.name, OriginalQueueName]),
+                            route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey);
+                        _ ->
+                            Qs2 = rabbit_amqqueue:prepend_extra_bcc(Qs1),
+                            Delay = calculate_delay(RetryCount, Args),
+                            Msg1 = push_annotations(Msg, RetryCount, Delay,
+                                                     OriginalQueueName, OriginalRoutingKey, DeathInfo),
+                            _ = rabbit_queue_type:deliver(Qs2, Msg1, #{}, stateless),
+                            []
+                    end
             end
     end.
 
@@ -307,8 +308,7 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
                     [];
                 {longstr, DLXName} ->
                     case rabbit_db_exchange:get(
-                             rabbit_misc:r(XName#resource.virtual_host, exchange, DLXName))
-                    of
+                             rabbit_misc:r(XName#resource.virtual_host, exchange, DLXName)) of
                         {ok, DLX} ->
                             DLRKeys =
                                 case rabbit_misc:table_lookup(Args, <<"x-dead-letter-routing-key">>)
@@ -328,8 +328,7 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
                                 end,
                             Msg1 = mc:set_annotation(?ANN_ROUTING_KEYS, DLRKeys, Msg),
                             DLMsg = mc:set_annotation(?ANN_EXCHANGE, DLXName, Msg1),
-                            Routed0 =
-                                rabbit_exchange:route(DLX, DLMsg, #{return_binding_keys => true}),
+                            Routed0 = rabbit_exchange:route(DLX, DLMsg, #{return_binding_keys => true}),
                             Qs0 = rabbit_db_queue:get_targets(Routed0),
                             Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
                             _ = rabbit_queue_type:deliver(Qs, DLMsg, #{}, stateless),
