@@ -3,7 +3,9 @@
 %% @end
 %%==============================================================================
 
-%% @doc Implement required exchange behaviors for the retry_exchange
+%% @doc Implement required exchange behaviors for the custom retry_exchange plugin.
+%% Handles message dead-lettering, exponential/linear retry delay strategies,
+%% and fallback dead-letter exchanges (DLX) upon reaching maximum attempts.
 %% @end
 
 -module(rabbit_retry_exchange).
@@ -18,6 +20,7 @@
 
 -behaviour(rabbit_exchange_type).
 
+%% Register the custom exchange type 'x-retry' into the RabbitMQ registry during startup
 -rabbit_boot_step({?MODULE,
                    [{description, "exchange type retry"},
                     {mfa,
@@ -27,60 +30,70 @@
                     {requires, rabbit_registry},
                     {enables, kernel_ready}]}).
 
--export([add_binding/3, assert_args_equivalence/2, create/2, delete/2, policy_changed/2,
+-export([add_binding/3, assert_args_equivalence/2, create/2, delete/2, delete/3, policy_changed/2,
          description/0, recover/2, remove_bindings/3, validate_binding/2, route/3,
-         serialise_events/0, validate/1, info/1, info/2]).
+         serialise_events/0, stateless/0, validate/1, info/1, info/2, info/3]).
 
+%% Internal representation of a message container
 -record(mc, {protocol, data, annotations = #{}}).
 
 -define(DEFAULT_EXCHANGE_NAME, <<>>).
 
+%% @doc Returns description metadata displayed in Management UI / CLI
 description() ->
     [{name, <<"x-retry">>},
      {description, <<"Custom exchange with DLQ-based retry and DLX support">>}].
 
+%% @doc Core routing function invoked when a message enters the retry exchange
 route(#exchange{name = XName, arguments = Args}, Msg, _Opts) ->
+    %% Check if this message is returning from a retry delay queue (indicated by x-retry-last-death-queue header)
     case mc:x_header(<<"x-retry-last-death-queue">>, Msg) of
         {utf8, RetryQueueName} ->
+            %% Message has completed its delay phase; route it back directly to its target queue
             QRes = rabbit_misc:r(XName#resource.virtual_host, queue, RetryQueueName),
             Qs0 = case rabbit_db_queue:get(QRes) of
-                      {error, _} ->
-                          [];
-                      {ok, Q} ->
-                          [Q]
+                      {error, _} -> [];
+                      {ok, Q} -> [Q]
                   end,
             Qs1 = rabbit_amqqueue:prepend_extra_bcc(Qs0),
             Msg1 = pop_annotations(Msg),
             _ = rabbit_queue_type:deliver(Qs1, Msg1, #{}, stateless),
             [];
+
         undefined ->
+            %% New dead-lettered message: parse retry attempts and dead-letter headers
             {RetryCount, OriginalQueueName, OriginalRoutingKey, DeathInfo} = get_retry_info(Msg),
 
             MaxAttempts =
                 case rabbit_misc:table_lookup(Args, <<"x-retry-max-attempts">>) of
-                    {long, Value} ->
-                        Value;
-                    _ ->
-                        infinity
+                    {long, Value} -> Value;
+                    _ -> infinity
                 end,
 
             case {RetryCount, OriginalQueueName} of
                 {0, _Q} ->
+                    %% Non-rejected death (e.g., message expired or queue length limit exceeded)
                     ?LOG_DEBUG("Retry Exchange (~s): Non-rejected dead-letter reason detected. "
                                "Routing to configured terminal DLX.",
                                [XName]),
                     route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey);
+
                 {_RC, undefined} ->
+                    %% Cannot determine original queue origin from x-death header
                     ?LOG_DEBUG("Retry Exchange (~s): Original Queue not found in x-death. Dropping "
                                "(no route found).",
                                [XName#resource.name]),
                     [];
+
                 {_RC, _Q} when RetryCount > MaxAttempts ->
+                    %% Retry budget exhausted; pass to fallback DLX
                     ?LOG_DEBUG("Retry Exchange (~s): Max attempts (~p) reached. Routing to "
                                "configured terminal DLX.",
                                [XName#resource.name, MaxAttempts]),
                     route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey);
+
                 {_RC, _Q} ->
+                    %% Message eligible for retry: find corresponding retry queue binding
                     Qs0 = rabbit_db_binding:match(XName,
                                                   fun(#binding{key = RoutingKey}) ->
                                                      RoutingKey == OriginalQueueName
@@ -88,6 +101,8 @@ route(#exchange{name = XName, arguments = Args}, Msg, _Opts) ->
                     Qs1 = rabbit_db_queue:get_targets(Qs0),
                     Qs2 = rabbit_amqqueue:prepend_extra_bcc(Qs1),
                     Delay = calculate_delay(RetryCount, Args),
+
+                    %% Annotate message with TTL delay & routing headers for the delay queue
                     Msg1 =
                         push_annotations(Msg,
                                          RetryCount,
@@ -100,12 +115,14 @@ route(#exchange{name = XName, arguments = Args}, Msg, _Opts) ->
             end
     end.
 
+%% @doc Annotates modern message containers (#mc{}) with custom retry metadata and expiration
 push_annotations(#mc{annotations = Anns} = Msg,
                  RetryCount,
                  Delay,
                  OriginalQueueName,
                  OriginalRoutingKey,
                  DeathInfo) ->
+    %% Clean up existing death annotations to avoid header duplication loops
     Anns0 =
         maps:fold(fun(Key, Value, Acc) ->
                      case Key of
@@ -144,6 +161,8 @@ push_annotations(#mc{annotations = Anns} = Msg,
             Anns2 = Anns1#{<<"x-retry-routing-key">> => OriginalRoutingKey},
             Msg#mc{annotations = Anns2}
     end;
+
+%% @doc Annotates standard AMQP 0-9-1 messages (#basic_message{}) with custom headers and TTL
 push_annotations(#basic_message{content =
                                     #content{properties = #'P_basic'{headers = Headers} = Props} =
                                         Content} =
@@ -200,6 +219,7 @@ push_annotations(#basic_message{content =
                       exchange_name = ?DEFAULT_EXCHANGE_NAME,
                       routing_keys = [OriginalQueueName]}.
 
+%% @doc Removes temporary retry annotations from #mc{} before redelivering to target queue
 pop_annotations(#mc{annotations = Anns} = Msg) ->
     Anns0 =
         maps:fold(fun(Key, Value, Acc) ->
@@ -227,22 +247,20 @@ pop_annotations(#mc{annotations = Anns} = Msg) ->
                   #{},
                   Anns),
     Msg#mc{annotations = Anns0};
+
+%% @doc Restores original AMQP 0-9-1 message headers and routing properties
 pop_annotations(#basic_message{content =
                                    #content{properties = #'P_basic'{headers = Headers} = Props} =
                                        Content} =
                     Msg) ->
     Exchange =
         case rabbit_misc:table_lookup(Headers, <<"x-retry-last-death-exchange">>) of
-            {longstr, Value0} ->
-                Value0;
-            _ ->
-                ?DEFAULT_EXCHANGE_NAME
+            {longstr, Value0} -> Value0;
+            _ -> ?DEFAULT_EXCHANGE_NAME
         end,
     RK = case rabbit_misc:table_lookup(Headers, <<"x-retry-routing-key">>) of
-             {longstr, Value1} ->
-                 Value1;
-             _ ->
-                 <<>>
+             {longstr, Value1} -> Value1;
+             _ -> <<>>
          end,
     Headers0 =
         lists:flatmap(fun({Key, Type, Value} = Entry) ->
@@ -272,13 +290,12 @@ pop_annotations(#basic_message{content =
                       exchange_name = Exchange,
                       routing_keys = [RK]}.
 
+%% @doc Routes messages to terminal Dead Letter Exchange (DLX) when retry limits are exceeded
 route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
     Bindings =
         case rabbit_db_binding:match_routing_key(XName, [OriginalQueueName], true) of
-            [QName] ->
-                rabbit_db_binding:get_all(XName, QName, false);
-            _ ->
-                undefined
+            [QName] -> rabbit_db_binding:get_all(XName, QName, false);
+            _ -> undefined
         end,
 
     case Bindings of
@@ -330,16 +347,17 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
             []
     end.
 
+%% @doc Extracts retry information (attempt count, queue name, routing key, death metadata)
 get_retry_info(Msg) ->
     case mc:get_annotation(deaths, Msg) of
-        %% Handle modern RabbitMQ message containers where deaths are stored in a map.
-        %% Guard with map_size > 0 prevents runtime badmatch crashes on empty maps.
+        %% Modern RabbitMQ message container format where death records are stored in a map.
+        %% Guarding with map_size > 0 prevents pattern match errors on empty maps.
         Death0 = #deaths{records = Rs} when is_map(Rs), map_size(Rs) > 0 ->
-            %% Find the most recent death record by iterating over the map using maps:fold/3
-            %% to track the highest timestamp ('time') without allocating intermediate lists or sorting.
+            %% Locate the most recent death record by iterating over the map using maps:fold/3.
+            %% This tracks the highest timestamp ('time') with zero memory allocation.
             {LastDeathKey, LastDeathRecord} =
                 maps:fold(
-                  fun(Key, #death{time = T} = Rec, undefined) ->
+                  fun(Key, #death{time = _T} = Rec, undefined) ->
                           {Key, Rec};
                      (Key, #death{time = T} = Rec, {_, #death{time = MaxT}} = Acc) ->
                           if T > MaxT -> {Key, Rec};
@@ -352,52 +370,47 @@ get_retry_info(Msg) ->
             #death{count = Count, routing_keys = RKeys} = LastDeathRecord,
             {Queue, Reason} = LastDeathKey,
 
+            RK = case RKeys of
+                [RK_bin | _] when is_binary(RK_bin) -> RK_bin;
+                _ -> undefined
+            end,
+
             case Reason of
                 rejected ->
-                    RK = case RKeys of
-                             [RK_bin | _] when is_binary(RK_bin) ->
-                                 RK_bin;
-                             _ ->
-                                 undefined
-                         end,
                     {Count, Queue, RK, Death0};
-
-                %% Non-rejected dead-letter reason (e.g., expired TTL, max-length overflow)
                 _ ->
-                    {1, undefined, undefined, undefined}
+                    %% Non-rejected dead-letter reason (e.g., TTL expired or max queue length exceeded)
+                    {0, Queue, RK, Death0}
             end;
 
-        %% Legacy / AMQP 0-9-1 format where deaths are stored as a list of tuples.
-        %% The most recent death event is already guaranteed to be at the head of the list.
+        %% Legacy / AMQP 0-9-1 format where death records are stored as a list of tuples.
+        %% The most recent death record is guaranteed to be at the head of the list.
         Death1 = [{DeathKey, #death{count = Count, routing_keys = RKeys}} | _] ->
             {Queue, Reason} = DeathKey,
 
+            RK = case RKeys of
+                [RK_bin | _] when is_binary(RK_bin) -> RK_bin;
+                _ -> undefined
+            end,
+
             case Reason of
                 rejected ->
-                    RK = case RKeys of
-                             [RK_bin | _] when is_binary(RK_bin) ->
-                                 RK_bin;
-                             _ ->
-                                 undefined
-                         end,
                     {Count, Queue, RK, Death1};
-
-                %% Non-rejected dead-letter reason (e.g., expired TTL, max-length overflow)      
                 _ ->
-                    {1, undefined, undefined, undefined}
+                    {0, Queue, RK, Death1}
             end;
-        %% Fallback when no x-death annotations/headers are present
+
+        %% Default fallback when no x-death headers/annotations are present
         _ ->
             {1, undefined, undefined, undefined}
     end.
 
+%% @doc Computes delay TTL (in ms) based on strategy: fixed, linear, exponential, or random
 calculate_delay(RetryCount, Args) ->
     Delay =
         case rabbit_misc:table_lookup(Args, <<"x-retry-delay">>) of
-            {long, Value} ->
-                Value;
-            _ ->
-                100
+            {long, Value} -> Value;
+            _ -> 100
         end,
     ActualDelay =
         case rabbit_misc:table_lookup(Args, <<"x-retry-delay-strategy">>) of
@@ -412,56 +425,52 @@ calculate_delay(RetryCount, Args) ->
                 Delay
         end,
     case rabbit_misc:table_lookup(Args, <<"x-retry-max-delay">>) of
-        {long, MaxDelay} when ActualDelay > MaxDelay ->
-            MaxDelay;
-        _ ->
-            ActualDelay
+        {long, MaxDelay} when ActualDelay > MaxDelay -> MaxDelay;
+        _ -> ActualDelay
     end.
 
-info(_X) ->
-    [].
+%% Callback implementations for rabbit_exchange_type behavior
+info(_X) -> [].
+info(_X, _) -> [].
 
-info(_X, _) ->
-    [].
+%% Handles 3-arity info calls required by rabbit_exchange_type in recent RabbitMQ versions
+info(_X, _Items, _VirtualHost) -> [].
 
-serialise_events() ->
-    false.
+serialise_events() -> false.
 
+%% Indicates to RabbitMQ core that this exchange plugin is stateless
+stateless() -> true.
+
+%% @doc Validates exchange declaration arguments (delay, max attempts, strategy)
 validate(#exchange{arguments = Args}) ->
     rabbit_retry_exchange_util:validate_args(Args,
-                                             [{<<"x-retry-delay">>,
-                                               required,
-                                               fun rabbit_retry_exchange_util:validate_delay/1},
-                                              {<<"x-retry-max-attempts">>,
-                                               required,
-                                               fun rabbit_retry_exchange_util:validate_max_attempts/1},
-                                              {<<"x-retry-max-delay">>,
-                                               optional,
-                                               fun rabbit_retry_exchange_util:validate_max_delay/2},
-                                              {<<"x-retry-delay-strategy">>,
-                                               optional,
-                                               fun rabbit_retry_exchange_util:validate_delay_strategy/1}]).
+                                              [{<<"x-retry-delay">>,
+                                                required,
+                                                fun rabbit_retry_exchange_util:validate_delay/1},
+                                               {<<"x-retry-max-attempts">>,
+                                                required,
+                                                fun rabbit_retry_exchange_util:validate_max_attempts/1},
+                                               {<<"x-retry-max-delay">>,
+                                                optional,
+                                                fun rabbit_retry_exchange_util:validate_max_delay/2},
+                                               {<<"x-retry-delay-strategy">>,
+                                                optional,
+                                                fun rabbit_retry_exchange_util:validate_delay_strategy/1}]).
 
-create(_Serial, _X) ->
-    ok.
+create(_Serial, _X) -> ok.
+recover(_X, _Bs) -> ok.
+delete(_Serial, _X) -> ok.
 
-recover(_X, _Bs) ->
-    ok.
+%% Handles transactional/contextual exchange deletion calls
+delete(_Serial, _X, _Bs) -> ok.
 
-delete(_Serial, _X) ->
-    ok.
+policy_changed(_X1, _X2) -> ok.
+add_binding(_Serial, _X, _B) -> ok.
+remove_bindings(_Serial, _X, _Bs) -> ok.
 
-policy_changed(_X1, _X2) ->
-    ok.
-
-add_binding(_Serial, _X, _B) ->
-    ok.
-
-remove_bindings(_Serial, _X, _Bs) ->
-    ok.
-
+%% @doc Ensures bindings are valid and connected queues specify correct x-dead-letter-exchange settings
 validate_binding(#exchange{name = XName},
-                 #binding{args = Args, destination = #resource{kind = queue} = QName}) ->
+                  #binding{args = Args, destination = #resource{kind = queue} = QName}) ->
     case rabbit_db_queue:get(QName) of
         {ok, Q} when ?is_amqqueue(Q) ->
             QArgs = amqqueue:get_arguments(Q),
@@ -473,12 +482,12 @@ validate_binding(#exchange{name = XName},
                                                [XName#resource.name]);
                 {longstr, DLX} when DLX == XName#resource.name ->
                     rabbit_retry_exchange_util:validate_args(Args,
-                                                             [{<<"x-dead-letter-exchange">>,
-                                                               optional,
-                                                               fun rabbit_retry_exchange_util:validate_dlx/1},
-                                                              {<<"x-dead-letter-routing-key">>,
-                                                               optional,
-                                                               fun rabbit_retry_exchange_util:validate_dlk/1}]);
+                                                              [{<<"x-dead-letter-exchange">>,
+                                                                optional,
+                                                                fun rabbit_retry_exchange_util:validate_dlx/1},
+                                                               {<<"x-dead-letter-routing-key">>,
+                                                                optional,
+                                                                fun rabbit_retry_exchange_util:validate_dlk/1}]);
                 {_, DLX} ->
                     rabbit_misc:protocol_error(precondition_failed,
                                                "Binding destination must be a valid queue with x-dead-letter-exchang"
