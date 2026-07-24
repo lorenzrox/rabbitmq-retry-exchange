@@ -244,16 +244,11 @@ pop_annotations(#mc{annotations = Anns} = Msg) ->
                          ?ANN_EXCHANGE -> Acc;
                          <<"x-retry-death">> -> Acc#{deaths => Value};
                          <<"x-retry-routing-key">> -> Acc#{?ANN_ROUTING_KEYS => [Value]};
-                         <<"x-retry-first-death-exchange">> ->
-                             Acc#{<<"x-first-death-exchange">> => Value};
-                         <<"x-retry-first-death-reason">> ->
-                             Acc#{<<"x-first-death-reason">> => Value};
-                         <<"x-retry-first-death-queue">> ->
-                             Acc#{<<"x-first-death-queue">> => Value};
-                         <<"x-retry-last-death-exchange">> ->
-                             Acc#{<<"x-last-death-exchange">> => Value, ?ANN_EXCHANGE => Value};
-                         <<"x-retry-last-death-reason">> ->
-                             Acc#{<<"x-last-death-reason">> => Value};
+                         <<"x-retry-first-death-exchange">> -> Acc#{<<"x-first-death-exchange">> => Value};
+                         <<"x-retry-first-death-reason">> -> Acc#{<<"x-first-death-reason">> => Value};
+                         <<"x-retry-first-death-queue">> -> Acc#{<<"x-first-death-queue">> => Value};
+                         <<"x-retry-last-death-exchange">> -> Acc#{<<"x-last-death-exchange">> => Value, ?ANN_EXCHANGE => Value};
+                         <<"x-retry-last-death-reason">> -> Acc#{<<"x-last-death-reason">> => Value};
                          <<"x-retry-last-death-queue">> -> Acc#{<<"x-last-death-queue">> => Value};
                          _ -> Acc#{Key => Value}
                      end

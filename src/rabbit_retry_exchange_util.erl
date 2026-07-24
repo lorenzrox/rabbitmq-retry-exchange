@@ -13,7 +13,8 @@
 -include_lib("kernel/include/logger.hrl").
 
 -export([validate_args/2, validate_max_attempts/1, validate_delay_strategy/1,
-         validate_delay/1, validate_max_delay/2, validate_dlx/1, validate_dlk/1]).
+         validate_delay/1, validate_max_delay/2, validate_dlx/1, validate_dlk/1,
+         table_merge/2]).
 
 validate_max_attempts({long, Term}) when is_integer(Term) ->
     case Term >= 1 of
@@ -170,3 +171,32 @@ validate_args(Args, [{Key, optional, Validator} | Rest], Errors) ->
     end;
 validate_args(_Args, _, [Error | _]) ->
     Error.
+
+table_merge(Base, []) ->
+    Base;
+table_merge([], Updates) ->
+    Updates;
+table_merge(Base, [Update]) ->
+    table_merge_one(Base, Update, []);
+table_merge(Base, Updates) ->
+    UpdateMap = maps:from_list([{Key, {Type, Value}} || {Key, Type, Value} <- Updates]),
+    {MergedRev, RemainingMap} =
+        lists:foldl(fun({Key, _Type, _Value} = Entry, {Acc, Pending}) ->
+                       case maps:take(Key, Pending) of
+                           {{NewType, NewValue}, Pending1} ->
+                               {[{Key, NewType, NewValue} | Acc], Pending1};
+                           error ->
+                               {[Entry | Acc], Pending}
+                       end
+                    end,
+                    {[], UpdateMap},
+                    Base),
+    lists:reverse(MergedRev) ++
+        [Entry || Entry = {Key, _Type, _Value} <- Updates, maps:is_key(Key, RemainingMap)].
+
+table_merge_one([{Key, _Type, _Value} | Rest], {Key, NewType, NewValue}, Acc) ->
+    lists:reverse(Acc, [{Key, NewType, NewValue} | Rest]);
+table_merge_one([Entry | Rest], Update, Acc) ->
+    table_merge_one(Rest, Update, [Entry | Acc]);
+table_merge_one([], Update, Acc) ->
+    lists:reverse([Update | Acc]).
