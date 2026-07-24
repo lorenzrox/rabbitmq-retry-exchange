@@ -12,7 +12,6 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
--include_lib("rabbit/include/rabbit_global_counters.hrl").
 -include_lib("rabbit/include/mc.hrl").
 -include_lib("rabbit/include/amqqueue.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -333,10 +332,25 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
 
 get_retry_info(Msg) ->
     case mc:get_annotation(deaths, Msg) of
-        Death0 = #deaths{records = Rs} when is_map(Rs) ->
-            [DeathKey | _] = maps:keys(Rs),
-            #death{count = Count, routing_keys = RKeys} = maps:get(DeathKey, Rs),
-            {Queue, Reason} = DeathKey,
+        %% Handle modern RabbitMQ message containers where deaths are stored in a map.
+        %% Guard with map_size > 0 prevents runtime badmatch crashes on empty maps.
+        Death0 = #deaths{records = Rs} when is_map(Rs), map_size(Rs) > 0 ->
+            %% Find the most recent death record by iterating over the map using maps:fold/3
+            %% to track the highest timestamp ('time') without allocating intermediate lists or sorting.
+            {LastDeathKey, LastDeathRecord} =
+                maps:fold(
+                  fun(Key, #death{time = T} = Rec, undefined) ->
+                          {Key, Rec};
+                     (Key, #death{time = T} = Rec, {_, #death{time = MaxT}} = Acc) ->
+                          if T > MaxT -> {Key, Rec};
+                             true     -> Acc
+                          end
+                  end,
+                  undefined,
+                  Rs),
+
+            #death{count = Count, routing_keys = RKeys} = LastDeathRecord,
+            {Queue, Reason} = LastDeathKey,
 
             case Reason of
                 rejected ->
@@ -347,9 +361,14 @@ get_retry_info(Msg) ->
                                  undefined
                          end,
                     {Count, Queue, RK, Death0};
+
+                %% Non-rejected dead-letter reason (e.g., expired TTL, max-length overflow)
                 _ ->
                     {1, undefined, undefined, undefined}
             end;
+
+        %% Legacy / AMQP 0-9-1 format where deaths are stored as a list of tuples.
+        %% The most recent death event is already guaranteed to be at the head of the list.
         Death1 = [{DeathKey, #death{count = Count, routing_keys = RKeys}} | _] ->
             {Queue, Reason} = DeathKey,
 
@@ -362,9 +381,12 @@ get_retry_info(Msg) ->
                                  undefined
                          end,
                     {Count, Queue, RK, Death1};
+
+                %% Non-rejected dead-letter reason (e.g., expired TTL, max-length overflow)      
                 _ ->
                     {1, undefined, undefined, undefined}
             end;
+        %% Fallback when no x-death annotations/headers are present
         _ ->
             {1, undefined, undefined, undefined}
     end.
