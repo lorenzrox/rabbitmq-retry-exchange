@@ -458,18 +458,10 @@ stateless() -> true.
 %% @doc Validates exchange declaration arguments (delay, max attempts, strategy)
 validate(#exchange{arguments = Args}) ->
     rabbit_retry_exchange_util:validate_args(Args,
-                                              [{<<"x-retry-delay">>,
-                                                required,
-                                                fun rabbit_retry_exchange_util:validate_delay/1},
-                                               {<<"x-retry-max-attempts">>,
-                                                required,
-                                                fun rabbit_retry_exchange_util:validate_max_attempts/1},
-                                               {<<"x-retry-max-delay">>,
-                                                optional,
-                                                fun rabbit_retry_exchange_util:validate_max_delay/2},
-                                               {<<"x-retry-delay-strategy">>,
-                                                optional,
-                                                fun rabbit_retry_exchange_util:validate_delay_strategy/1}]).
+                                              [{<<"x-retry-delay">>, required, fun rabbit_retry_exchange_util:validate_delay/1},
+                                               {<<"x-retry-max-attempts">>, required, fun rabbit_retry_exchange_util:validate_max_attempts/1},
+                                               {<<"x-retry-max-delay">>, optional, fun rabbit_retry_exchange_util:validate_max_delay/2},
+                                               {<<"x-retry-delay-strategy">>, optional, fun rabbit_retry_exchange_util:validate_delay_strategy/1}]).
 
 create(_Serial, _X) -> ok.
 recover(_X, _Bs) -> ok.
