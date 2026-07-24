@@ -186,25 +186,46 @@ push_annotations(#mc{annotations = Anns} = Msg,
     end;
 
 %% @doc Annotates standard AMQP 0-9-1 messages (#basic_message{}) with custom headers and TTL
-push_annotations(#basic_message{content = #content{properties = #'P_basic'{headers = Headers} = Props} = Content} =
-                     Msg, RetryCount, Delay, OriginalQueueName, OriginalRoutingKey, DeathInfo) ->
+push_annotations(#basic_message{content =
+                                    #content{properties = #'P_basic'{headers = Headers} = Props} =
+                                        Content} =
+                     Msg,
+                 RetryCount,
+                 Delay,
+                 OriginalQueueName,
+                 OriginalRoutingKey,
+                 DeathInfo) ->
     Headers0 =
         lists:flatmap(fun({Key, Type, Value} = Entry) ->
                          case Key of
-                             <<"x-first-death-exchange">> -> [{<<"x-retry-first-death-exchange">>, Type, Value}];
-                             <<"x-first-death-reason">> -> [{<<"x-retry-first-death-reason">>, Type, Value}];
-                             <<"x-first-death-queue">> -> [{<<"x-retry-first-death-queue">>, Type, Value}];
-                             <<"x-last-death-exchange">> -> [{<<"x-retry-last-death-exchange">>, Type, Value}];
-                             <<"x-last-death-reason">> -> [];
-                             <<"x-last-death-queue">> -> [];
-                             <<"x-death">> -> [];
-                             <<"x-retry-death">> -> [];
-                             <<"x-retry-count">> -> [];
-                             <<"x-retry-delay">> -> [];
-                             <<"x-retry-last-death-reason">> -> [];
-                             <<"x-retry-last-death-queue">> -> [];
-                             <<"x-retry-routing-key">> -> [];
-                             _ -> [Entry]
+                             <<"x-first-death-exchange">> ->
+                                 [{<<"x-retry-first-death-exchange">>, Type, Value}];
+                             <<"x-first-death-reason">> ->
+                                 [{<<"x-retry-first-death-reason">>, Type, Value}];
+                             <<"x-first-death-queue">> ->
+                                 [{<<"x-retry-first-death-queue">>, Type, Value}];
+                             <<"x-last-death-exchange">> ->
+                                 [{<<"x-retry-last-death-exchange">>, Type, Value}];
+                             <<"x-last-death-reason">> ->
+                                 [];
+                             <<"x-last-death-queue">> ->
+                                 [];
+                             <<"x-death">> ->
+                                 [];
+                             <<"x-retry-death">> ->
+                                 [];
+                             <<"x-retry-count">> ->
+                                 [];
+                             <<"x-retry-delay">> ->
+                                 [];
+                             <<"x-retry-last-death-reason">> ->
+                                 [];
+                             <<"x-retry-last-death-queue">> ->
+                                 [];
+                             <<"x-retry-routing-key">> ->
+                                 [];
+                             _ ->
+                                 [Entry]
                          end
                       end,
                       Headers),
@@ -258,15 +279,20 @@ pop_annotations(#mc{annotations = Anns} = Msg) ->
     Msg#mc{annotations = Anns0};
 
 %% @doc Restores original AMQP 0-9-1 message headers and routing properties
-pop_annotations(#basic_message{content = #content{properties = #'P_basic'{headers = Headers} = Props} = Content} = Msg) ->
-    Exchange = case rabbit_misc:table_lookup(Headers, <<"x-retry-last-death-exchange">>) of
+pop_annotations(#basic_message{content =
+                                   #content{properties = #'P_basic'{headers = Headers} = Props} =
+                                       Content} =
+                    Msg) ->
+    Exchange =
+        case rabbit_misc:table_lookup(Headers, <<"x-retry-last-death-exchange">>) of
             {longstr, Value0} -> Value0;
             _ -> ?DEFAULT_EXCHANGE_NAME
         end,
-    RK = case rabbit_misc:table_lookup(Headers, <<"x-retry-routing-key">>) of
-             {longstr, Value1} -> Value1;
-             _ -> <<>>
-         end,
+    RK =
+        case rabbit_misc:table_lookup(Headers, <<"x-retry-routing-key">>) of
+            {longstr, Value1} -> Value1;
+            _ -> <<>>
+        end,
     Headers0 =
         lists:flatmap(fun({Key, Type, Value} = Entry) ->
                          case Key of

@@ -1,0 +1,11 @@
+ARG RABBITMQ_VERSION=v4.3.4
+
+FROM rabbitmqdevenv/build-env-27.3
+ARG RABBITMQ_VERSION
+
+RUN git clone --branch ${RABBITMQ_VERSION} https://github.com/rabbitmq/rabbitmq-server.git /rabbitmq-server
+
+WORKDIR /rabbitmq-server/deps/rabbitmq-retry-exchange
+COPY . /rabbitmq-server/deps/rabbitmq-retry-exchange
+
+RUN make RABBITMQ_VERSION=${RABBITMQ_VERSION} tests
