@@ -352,35 +352,18 @@ get_retry_info(Msg) ->
     case mc:get_annotation(deaths, Msg) of
         %% Modern RabbitMQ message container format where death records are stored in a map.
         %% Guarding with map_size > 0 prevents pattern match errors on empty maps.
-        Death0 = #deaths{records = Rs} when is_map(Rs), map_size(Rs) > 0 ->
-            %% Locate the most recent death record by iterating over the map using maps:fold/3.
-            %% This tracks the highest timestamp ('time') with zero memory allocation.
-            {LastDeathKey, LastDeathRecord} =
-                maps:fold(
-                  fun(Key, #death{time = _T} = Rec, undefined) ->
-                          {Key, Rec};
-                     (Key, #death{time = T} = Rec, {_, #death{time = MaxT}} = Acc) ->
-                          if T > MaxT -> {Key, Rec};
-                             true     -> Acc
-                          end
-                  end,
-                  undefined,
-                  Rs),
-
-            #death{count = Count, routing_keys = RKeys} = LastDeathRecord,
+        Death0 = #deaths{last = LastDeathKey, records = Rs} when is_map(Rs), map_size(Rs) > 0 ->
+            #death{count = Count, routing_keys = RKeys} = maps:get(LastDeathKey, Rs),
             {Queue, Reason} = LastDeathKey,
 
             RK = case RKeys of
-                [RK_bin | _] when is_binary(RK_bin) -> RK_bin;
-                _ -> undefined
-            end,
+                    [RK_bin | _] when is_binary(RK_bin) -> RK_bin;
+                    _ -> undefined
+                end,
 
             case Reason of
-                rejected ->
-                    {Count, Queue, RK, Death0};
-                _ ->
-                    %% Non-rejected dead-letter reason (e.g., TTL expired or max queue length exceeded)
-                    {0, Queue, RK, Death0}
+                rejected -> {Count, Queue, RK, Death0};
+                _        -> {0, Queue, RK, Death0}
             end;
 
         %% Legacy / AMQP 0-9-1 format where death records are stored as a list of tuples.
@@ -394,10 +377,8 @@ get_retry_info(Msg) ->
             end,
 
             case Reason of
-                rejected ->
-                    {Count, Queue, RK, Death1};
-                _ ->
-                    {0, Queue, RK, Death1}
+                rejected -> {Count, Queue, RK, Death1};
+                _ ->        {0, Queue, RK, Death1}
             end;
 
         %% Default fallback when no x-death headers/annotations are present
