@@ -51,24 +51,38 @@ route(#exchange{name = XName, arguments = Args}, Msg, _Opts) ->
         {utf8, RetryQueueName} ->
             %% Message has completed its delay phase; route it back directly to its target queue
             QRes = rabbit_misc:r(XName#resource.virtual_host, queue, RetryQueueName),
-            Qs0 = case rabbit_db_queue:get(QRes) of
-                      {error, _} -> [];
-                      {ok, Q} -> [Q]
-                  end,
-            Qs1 = rabbit_amqqueue:prepend_extra_bcc(Qs0),
-            Msg1 = pop_annotations(Msg),
-            _ = rabbit_queue_type:deliver(Qs1, Msg1, #{}, stateless),
-            [];
+            case rabbit_db_queue:get(QRes) of
+                {ok, Q} ->
+                    Qs1 = rabbit_amqqueue:prepend_extra_bcc([Q]),
+                    Msg1 = pop_annotations(Msg),
+                    _ = rabbit_queue_type:deliver(Qs1, Msg1, #{}, stateless),
+                    [];
+                {error, not_found} ->
+                    ?LOG_DEBUG("Retry Exchange (~s): retry target queue '~s' not found. Routing to configured terminal DLX.",
+                                [XName#resource.name, RetryQueueName]),
+
+                    OriginalRoutingKey = case mc:x_header(<<"x-retry-routing-key">>, Msg) of
+                        {utf8, RK} -> RK;
+                        _ -> undefined
+                    end,
+
+                    route_to_fallback_dlx(XName, Msg, RetryQueueName, OriginalRoutingKey);
+
+                {error, Reason} ->
+                    ?LOG_WARNING("Retry Exchange (~s): retry target queue '~s' not found (~tp). Routing to configured terminal DLX.",
+                                  [XName#resource.name, RetryQueueName, Reason]),
+
+                    OriginalRoutingKey = case mc:x_header(<<"x-retry-routing-key">>, Msg) of
+                        {utf8, RK} -> RK;
+                        _ -> undefined
+                    end,
+
+                    route_to_fallback_dlx(XName, Msg, RetryQueueName, OriginalRoutingKey)
+                end;
 
         undefined ->
             %% New dead-lettered message: parse retry attempts and dead-letter headers
             {RetryCount, OriginalQueueName, OriginalRoutingKey, DeathInfo} = get_retry_info(Msg),
-
-            MaxAttempts =
-                case rabbit_misc:table_lookup(Args, <<"x-retry-max-attempts">>) of
-                    {long, Value} -> Value;
-                    _ -> infinity
-                end,
 
             case {RetryCount, OriginalQueueName} of
                 {0, _Q} ->
@@ -85,33 +99,37 @@ route(#exchange{name = XName, arguments = Args}, Msg, _Opts) ->
                                [XName#resource.name]),
                     [];
 
-                {_RC, _Q} when RetryCount > MaxAttempts ->
-                    %% Retry budget exhausted; pass to fallback DLX
-                    ?LOG_DEBUG("Retry Exchange (~s): Max attempts (~p) reached. Routing to "
-                               "configured terminal DLX.",
-                               [XName#resource.name, MaxAttempts]),
-                    route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey);
-
                 {_RC, _Q} ->
-                    %% Message eligible for retry: find corresponding retry queue binding
-                    Qs0 = rabbit_db_binding:match(XName,
-                                                  fun(#binding{key = RoutingKey}) ->
-                                                     RoutingKey == OriginalQueueName
-                                                  end),
-                    Qs1 = rabbit_db_queue:get_targets(Qs0),
-                    case Qs1 of
-                        [] ->
-                            ?LOG_WARNING("Retry Exchange (~s): No retry queue binding found for "
-                                         "queue '~s'. Routing to fallback DLX.",
-                                         [XName#resource.name, OriginalQueueName]),
+                    MaxAttempts = get_max_attempts(Msg, Args),
+
+                    case RetryCount > MaxAttempts of
+                        true ->
+                            %% Retry budget exhausted; pass to fallback DLX
+                            ?LOG_DEBUG("Retry Exchange (~s): Max attempts (~p) reached. Routing to "
+                                    "configured terminal DLX.",
+                                    [XName#resource.name, MaxAttempts]),
                             route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey);
-                        _ ->
-                            Qs2 = rabbit_amqqueue:prepend_extra_bcc(Qs1),
-                            Delay = calculate_delay(RetryCount, Args),
-                            Msg1 = push_annotations(Msg, RetryCount, Delay,
-                                                     OriginalQueueName, OriginalRoutingKey, DeathInfo),
-                            _ = rabbit_queue_type:deliver(Qs2, Msg1, #{}, stateless),
-                            []
+                        false ->
+                            %% Message eligible for retry: find corresponding retry queue binding
+                            Qs0 = rabbit_db_binding:match(XName,
+                                                        fun(#binding{key = RoutingKey}) ->
+                                                            RoutingKey == OriginalQueueName
+                                                        end),
+                            Qs1 = rabbit_db_queue:get_targets(Qs0),
+                            case Qs1 of
+                                [] ->
+                                    ?LOG_WARNING("Retry Exchange (~s): No retry queue binding found for "
+                                                "queue '~s'. Routing to fallback DLX.",
+                                                [XName#resource.name, OriginalQueueName]),
+                                    route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey);
+                                _ ->
+                                    Qs2 = rabbit_amqqueue:prepend_extra_bcc(Qs1),
+                                    Delay = calculate_delay(RetryCount, Args),
+                                    Msg1 = push_annotations(Msg, RetryCount, Delay,
+                                                            OriginalQueueName, OriginalRoutingKey, DeathInfo),
+                                    _ = rabbit_queue_type:deliver(Qs2, Msg1, #{}, stateless),
+                                    []
+                            end
                     end
             end
     end.
@@ -198,19 +216,14 @@ push_annotations(#basic_message{content =
                                 [{<<"x-retry-death">>, array, DeathInfo},
                                  {<<"x-retry-count">>, long, RetryCount},
                                  {<<"x-retry-delay">>, long, Delay},
-                                 {<<"x-retry-last-death-reason">>,
-                                  longstr,
-                                  atom_to_binary(rejected)},
+                                 {<<"x-retry-last-death-reason">>, longstr, atom_to_binary(rejected)},
                                  {<<"x-retry-last-death-queue">>, longstr, OriginalQueueName}]),
     Headers2 =
         case OriginalRoutingKey of
             undefined ->
                 Headers1;
             _ ->
-                rabbit_misc:set_table_value(Headers1,
-                                            <<"x-retry-routing-key">>,
-                                            longstr,
-                                            OriginalRoutingKey)
+                rabbit_misc:set_table_value(Headers1, <<"x-retry-routing-key">>, longstr, OriginalRoutingKey)
         end,
     Content0 =
         Content#content{properties =
@@ -307,24 +320,24 @@ route_to_fallback_dlx(XName, Msg, OriginalQueueName, OriginalRoutingKey) ->
                                  [XName#resource.name]),
                     [];
                 {longstr, DLXName} ->
-                    case rabbit_db_exchange:get(
-                             rabbit_misc:r(XName#resource.virtual_host, exchange, DLXName)) of
+                    case rabbit_db_exchange:get(rabbit_misc:r(XName#resource.virtual_host, exchange, DLXName)) of
                         {ok, DLX} ->
                             DLRKeys =
-                                case rabbit_misc:table_lookup(Args, <<"x-dead-letter-routing-key">>)
-                                of
-                                    undefined ->
-                                        ?LOG_DEBUG("Retry Exchange (~s): Routing message to fallback DLX ~s with "
-                                                   "original routing key ~s.",
-                                                   [XName#resource.name,
-                                                    DLXName,
-                                                    OriginalRoutingKey]),
-                                        [OriginalRoutingKey];
+                                case rabbit_misc:table_lookup(Args, <<"x-dead-letter-routing-key">>) of
                                     {longstr, RK} ->
-                                        ?LOG_DEBUG("Retry Exchange (~s): Routing message to fallback DLX ~s with "
-                                                   "routing key ~s.",
+                                        ?LOG_DEBUG("Retry Exchange (~s): Routing message to fallback DLX ~s with routing key ~s.",
                                                    [XName#resource.name, DLXName, RK]),
-                                        [RK]
+                                        [RK];
+
+                                    _ when is_binary(OriginalRoutingKey) ->
+                                        ?LOG_DEBUG("Retry Exchange (~s): Routing message to fallback DLX ~s with original routing key ~s.",
+                                                   [XName#resource.name, DLXName, OriginalRoutingKey]),
+                                        [OriginalRoutingKey];
+
+                                    _ ->
+                                        ?LOG_DEBUG("Retry Exchange (~s): Routing message to fallback DLX ~s without routing key",
+                                                   [XName#resource.name, DLXName]),
+                                        []
                                 end,
                             Msg1 = mc:set_annotation(?ANN_ROUTING_KEYS, DLRKeys, Msg),
                             DLMsg = mc:set_annotation(?ANN_EXCHANGE, DLXName, Msg1),
@@ -383,6 +396,27 @@ get_retry_info(Msg) ->
         %% Default fallback when no x-death headers/annotations are present
         _ ->
             {1, undefined, undefined, undefined}
+    end.
+
+%% @doc Calculates maximum retry attempts from exchange `Args` and message `Msg` headers returning the stricter limit
+get_max_attempts(Msg, Args) ->
+    ExchangeMaxAttempts =
+        case rabbit_misc:table_lookup(Args, <<"x-retry-max-attempts">>) of
+            {long, Value} when is_integer(Value), Value >= 1 ->
+                Value;
+            _ ->
+                infinity
+        end,
+    case mc:x_header(<<"x-retry-max-attempts">>, Msg) of
+        {long, Value} when is_integer(Value), Value >= 0 ->
+            case ExchangeMaxAttempts of
+                infinity ->
+                    Value;
+                _ ->
+                    erlang:min(Value, ExchangeMaxAttempts)
+            end;
+        _ ->
+            ExchangeMaxAttempts
     end.
 
 %% @doc Computes delay TTL (in ms) based on strategy: fixed, linear, exponential, or random
