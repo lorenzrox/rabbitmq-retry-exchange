@@ -34,6 +34,10 @@
          description/0, recover/2, remove_bindings/3, validate_binding/2, route/3,
          serialise_events/0, stateless/0, validate/1, info/1, info/2, info/3]).
 
+-ifdef(TEST).
+-export([calculate_delay/2, get_retry_info/1, pop_annotations/1, push_annotations/6]).
+-endif.
+
 %% Internal representation of a message container
 -record(mc, {protocol, data, annotations = #{}}).
 
@@ -182,53 +186,49 @@ push_annotations(#mc{annotations = Anns} = Msg,
     end;
 
 %% @doc Annotates standard AMQP 0-9-1 messages (#basic_message{}) with custom headers and TTL
-push_annotations(#basic_message{content =
-                                    #content{properties = #'P_basic'{headers = Headers} = Props} =
-                                        Content} =
-                     Msg,
-                 RetryCount,
-                 Delay,
-                 OriginalQueueName,
-                 OriginalRoutingKey,
-                 DeathInfo) ->
+push_annotations(#basic_message{content = #content{properties = #'P_basic'{headers = Headers} = Props} = Content} =
+                     Msg, RetryCount, Delay, OriginalQueueName, OriginalRoutingKey, DeathInfo) ->
     Headers0 =
         lists:flatmap(fun({Key, Type, Value} = Entry) ->
                          case Key of
-                             <<"x-first-death-exchange">> ->
-                                 [{<<"x-retry-first-death-exchange">>, Type, Value}];
-                             <<"x-first-death-reason">> ->
-                                 [{<<"x-retry-first-death-reason">>, Type, Value}];
-                             <<"x-first-death-queue">> ->
-                                 [{<<"x-retry-first-death-queue">>, Type, Value}];
-                             <<"x-last-death-exchange">> ->
-                                 [{<<"x-retry-last-death-exchange">>, Type, Value}];
-                             <<"x-last-death-reason">> ->
-                                 [{<<"x-retry-last-death-reason">>, Type, Value}];
-                             <<"x-last-death-queue">> ->
-                                 [{<<"x-retry-last-death-queue">>, Type, Value}];
+                             <<"x-first-death-exchange">> -> [{<<"x-retry-first-death-exchange">>, Type, Value}];
+                             <<"x-first-death-reason">> -> [{<<"x-retry-first-death-reason">>, Type, Value}];
+                             <<"x-first-death-queue">> -> [{<<"x-retry-first-death-queue">>, Type, Value}];
+                             <<"x-last-death-exchange">> -> [{<<"x-retry-last-death-exchange">>, Type, Value}];
+                             <<"x-last-death-reason">> -> [];
+                             <<"x-last-death-queue">> -> [];
                              <<"x-death">> -> [];
+                             <<"x-retry-death">> -> [];
+                             <<"x-retry-count">> -> [];
+                             <<"x-retry-delay">> -> [];
+                             <<"x-retry-last-death-reason">> -> [];
+                             <<"x-retry-last-death-queue">> -> [];
+                             <<"x-retry-routing-key">> -> [];
                              _ -> [Entry]
                          end
                       end,
                       Headers),
-    Headers1 =
-        rabbit_misc:table_merge(Headers0,
-                                [{<<"x-retry-death">>, array, DeathInfo},
-                                 {<<"x-retry-count">>, long, RetryCount},
-                                 {<<"x-retry-delay">>, long, Delay},
-                                 {<<"x-retry-last-death-reason">>, longstr, atom_to_binary(rejected)},
-                                 {<<"x-retry-last-death-queue">>, longstr, OriginalQueueName}]),
-    Headers2 =
+    RetryHeaders =
         case OriginalRoutingKey of
             undefined ->
-                Headers1;
+                [{<<"x-retry-death">>, array, DeathInfo},
+                 {<<"x-retry-count">>, long, RetryCount},
+                 {<<"x-retry-delay">>, long, Delay},
+                 {<<"x-retry-last-death-reason">>, longstr, atom_to_binary(rejected)},
+                 {<<"x-retry-last-death-queue">>, longstr, OriginalQueueName}];
             _ ->
-                rabbit_misc:set_table_value(Headers1, <<"x-retry-routing-key">>, longstr, OriginalRoutingKey)
+                [{<<"x-retry-death">>, array, DeathInfo},
+                 {<<"x-retry-count">>, long, RetryCount},
+                 {<<"x-retry-delay">>, long, Delay},
+                 {<<"x-retry-last-death-reason">>, longstr, atom_to_binary(rejected)},
+                 {<<"x-retry-last-death-queue">>, longstr, OriginalQueueName},
+                 {<<"x-retry-routing-key">>, longstr, OriginalRoutingKey}]
         end,
+    Headers1 = rabbit_retry_exchange_util:table_merge(Headers0, RetryHeaders),
     Content0 =
         Content#content{properties =
-                            Props#'P_basic'{expiration = integer_to_binary(Delay),
-                                            headers = Headers2}},
+                           Props#'P_basic'{expiration = integer_to_binary(Delay),
+                                           headers = Headers1}},
     Msg#basic_message{content = Content0,
                       exchange_name = ?DEFAULT_EXCHANGE_NAME,
                       routing_keys = [OriginalQueueName]}.
@@ -258,12 +258,8 @@ pop_annotations(#mc{annotations = Anns} = Msg) ->
     Msg#mc{annotations = Anns0};
 
 %% @doc Restores original AMQP 0-9-1 message headers and routing properties
-pop_annotations(#basic_message{content =
-                                   #content{properties = #'P_basic'{headers = Headers} = Props} =
-                                       Content} =
-                    Msg) ->
-    Exchange =
-        case rabbit_misc:table_lookup(Headers, <<"x-retry-last-death-exchange">>) of
+pop_annotations(#basic_message{content = #content{properties = #'P_basic'{headers = Headers} = Props} = Content} = Msg) ->
+    Exchange = case rabbit_misc:table_lookup(Headers, <<"x-retry-last-death-exchange">>) of
             {longstr, Value0} -> Value0;
             _ -> ?DEFAULT_EXCHANGE_NAME
         end,
