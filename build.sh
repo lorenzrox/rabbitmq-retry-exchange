@@ -4,7 +4,7 @@ set -e
 IMAGE="rabbitmqdevenv/build-env-27.3"
 CONTAINER_NAME="build-rabbitmq-retry-exchange"
 OUTPUT_DIR="$(pwd)/dist"
-RABBITMQ_VERSION="v4.2.1"
+RABBITMQ_VERSION="v4.3.4"
 
 mkdir -p "${OUTPUT_DIR}"
 rm -rf ${OUTPUT_DIR}/*

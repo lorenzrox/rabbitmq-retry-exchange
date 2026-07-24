@@ -100,9 +100,9 @@ erlang_app(
     name = "erlang_app",
     srcs = [":all_srcs"],
     hdrs = [":public_hdrs"],
-    app_description = "RabbitMQ Last Value Cache exchange",
+    app_description = "RabbitMQ Retry exchange",
     app_extra_keys = BROKER_VERSION_REQUIREMENTS_TERM,
-    app_name = "rabbitmq_lvc_exchange",
+    app_name = "rabbitmq_retry_exchange",
     app_version = module_version(),
     beam_files = [":beam_files"],
     license_files = [":license_files"],
@@ -114,7 +114,7 @@ erlang_app(
 )
 
 alias(
-    name = "rabbitmq_lvc_exchange",
+    name = "rabbitmq_retry_exchange",
     actual = ":erlang_app",
     visibility = ["//visibility:public"],
 )
@@ -123,7 +123,7 @@ test_erlang_app(
     name = "test_erlang_app",
     srcs = [":all_srcs"],
     hdrs = [":public_and_private_hdrs"],
-    app_name = "rabbitmq_lvc_exchange",
+    app_name = "rabbitmq_retry_exchange",
     beam_files = [":test_beam_files"],
     license_files = [":license_files"],
     priv = [":priv"],
@@ -185,7 +185,7 @@ rabbitmqctl(
 )
 
 rabbitmq_integration_suite(
-    name = "lvc_SUITE",
+    name = "retry_exchange_SUITE",
 )
 
 assert_suites2()
