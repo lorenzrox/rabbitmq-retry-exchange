@@ -1,8 +1,6 @@
-ARG RABBITMQ_VERSION=4.3.4
-
-# Build against the RabbitMQ release used by the test image.
-
 FROM rabbitmqdevenv/build-env-27.3 AS builder
+
+ARG RABBITMQ_VERSION=4.3.4
 
 WORKDIR /rabbitmq-server
 
@@ -17,10 +15,7 @@ RUN make RABBITMQ_VERSION=v${RABBITMQ_VERSION} \
     -C deps/rabbitmq-retry-exchange \
     DIST_AS_EZS=yes dist
 
-FROM rabbitmq:${RABBITMQ_VERSION}-management
-
+FROM scratch AS artifact
+ARG RABBITMQ_VERSION=4.3.4
 COPY --from=builder \
-    /rabbitmq-server/deps/rabbitmq-retry-exchange/plugins/rabbitmq_retry_exchange-v${RABBITMQ_VERSION}.ez \
-    /plugins/
-
-RUN rabbitmq-plugins enable --offline rabbitmq_retry_exchange
+    /rabbitmq-server/deps/rabbitmq-retry-exchange/plugins/rabbitmq_retry_exchange-v${RABBITMQ_VERSION}.ez /
