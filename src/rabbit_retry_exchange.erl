@@ -280,18 +280,18 @@ pop_annotations(#basic_message{content =
         lists:flatmap(fun({Key, Type, Value} = Entry) ->
                          case Key of
                              <<"x-retry-death">> -> [{<<"x-death">>, Type, Value}];
-                             <<"x-first-death-exchange">> ->
-                                 [{<<"x-retry-first-death-exchange">>, Type, Value}];
-                             <<"x-first-death-reason">> ->
-                                 [{<<"x-retry-first-death-reason">>, Type, Value}];
-                             <<"x-first-death-queue">> ->
-                                 [{<<"x-retry-first-death-queue">>, Type, Value}];
-                             <<"x-last-death-exchange">> ->
-                                 [{<<"x-retry-last-death-exchange">>, Type, Value}];
-                             <<"x-last-death-reason">> ->
-                                 [{<<"x-retry-last-death-reason">>, Type, Value}];
-                             <<"x-last-death-queue">> ->
-                                 [{<<"x-retry-last-death-queue">>, Type, Value}];
+                             <<"x-retry-first-death-exchange">> ->
+                                 [{<<"x-first-death-exchange">>, Type, Value}];
+                             <<"x-retry-first-death-reason">> ->
+                                 [{<<"x-first-death-reason">>, Type, Value}];
+                             <<"x-retry-first-death-queue">> ->
+                                 [{<<"x-first-death-queue">>, Type, Value}];
+                             <<"x-retry-last-death-exchange">> ->
+                                 [{<<"x-last-death-exchange">>, Type, Value}];
+                             <<"x-retry-last-death-reason">> ->
+                                 [{<<"x-last-death-reason">>, Type, Value}];
+                             <<"x-retry-last-death-queue">> ->
+                                 [{<<"x-last-death-queue">>, Type, Value}];
                              <<"x-death">> -> [];
                              <<"x-retry-routing-key">> -> [];
                              _ -> [Entry]
@@ -402,18 +402,18 @@ get_retry_info(Msg) ->
 get_max_attempts(Msg, Args) ->
     ExchangeMaxAttempts =
         case rabbit_misc:table_lookup(Args, <<"x-retry-max-attempts">>) of
-            {long, Value} when is_integer(Value), Value >= 1 ->
-                Value;
+            {long, ExchangeValue} when is_integer(ExchangeValue), ExchangeValue >= 1 ->
+                ExchangeValue;
             _ ->
                 infinity
         end,
     case mc:x_header(<<"x-retry-max-attempts">>, Msg) of
-        {long, Value} when is_integer(Value), Value >= 0 ->
+        {long, HeaderValue} when is_integer(HeaderValue), HeaderValue >= 0 ->
             case ExchangeMaxAttempts of
                 infinity ->
-                    Value;
+                    HeaderValue;
                 _ ->
-                    erlang:min(Value, ExchangeMaxAttempts)
+                    erlang:min(HeaderValue, ExchangeMaxAttempts)
             end;
         _ ->
             ExchangeMaxAttempts
